@@ -1,121 +1,45 @@
-name: Flutter Release and Backend Sync
-
-on:
-  push:
-    tags:
-      - 'v*'
-
-jobs:
-  build_and_release:
-    runs-on: ubuntu-latest
+- name: Send to Backend Server
+  run: |
+    echo "Preparing data for backend..."
     
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: 'stable'
-
-      - name: Extract version from pubspec.yaml
-        id: extract_version
-        run: |
-          VERSION=$(grep '^version:' pubspec.yaml | cut -d ' ' -f 2)
-          VERSION_NAME=$(echo $VERSION | cut -d '+' -f 1)
-          VERSION_CODE=$(echo $VERSION | cut -d '+' -f 2)
-          echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
-          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
-
-      - name: Build Flutter APKs
-        run: |
-          flutter pub get
-          flutter build apk --release
-          flutter build apk --release --split-per-abi
-
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: ELA v${{ steps.extract_version.outputs.version_name }}
-          body: |
-            ELA Release v${{ steps.extract_version.outputs.version_name }} (Build ${{ steps.extract_version.outputs.version_code }})
-            Automated release with general and per-ABI APKs
-          draft: false
-          prerelease: false
-
-      - name: Upload All APKs
-        run: |
-          # Upload each APK file
-          for apk in build/app/outputs/flutter-apk/*.apk; do
-            filename=$(basename "$apk")
-            curl -X POST \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$apk" \
-              "${{ steps.create_release.outputs.upload_url }}?name=$filename"
-          done
-
-      - name: Get Release Data from GitHub
-        id: get_release
-        run: |
-          # Fetch the complete release data from GitHub API
-          RELEASE_DATA=$(curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }})
-          
-          # Save release data to file for next step
-          echo "$RELEASE_DATA" > release_data.json
-          
-          # Extract release ID for reference
-          RELEASE_ID=$(echo "$RELEASE_DATA" | jq -r '.id')
-          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
-
-      - name: Send Release Data to Backend
-        run: |
-          # Read the GitHub release data
-          RELEASE_DATA=$(cat release_data.json)
-          
-          # Prepare data for your Django backend
-          BACKEND_PAYLOAD=$(echo "$RELEASE_DATA" | jq '{
-            app_name: "ELA",
-            package_name: "com.ela.app", 
-            version_name: "${{ steps.extract_version.outputs.version_name }}",
-            version_code: ${{ steps.extract_version.outputs.version_code }},
-            release_tag: .tag_name,
-            release_name: .name,
-            release_notes: .body,
-            release_url: .html_url,
-            github_release_id: .id,
-            created_at: .created_at,
-            published_at: .published_at,
-            apk_files: [.assets[] | {
-              name: .name,
-              download_url: .browser_download_url, 
-              size: .size,
-              download_count: .download_count,
-              content_type: .content_type,
-              github_asset_id: .id
-            }]
-          }')
-          
-          # Send to your backend server
-          echo "Sending release data to backend..."
-          curl -X POST "https://mfqdh2s3-8000.inc1.devtunnels.ms/api/releases/" \
-            -H "Content-Type: application/json" \
-            -H "User-Agent: ELA-GitHub-Workflow" \
-            -d "$BACKEND_PAYLOAD" \
-            --fail-with-body || {
-              echo "Backend call failed, but release was created successfully"
-              echo "Release URL: ${{ steps.create_release.outputs.html_url }}"
-            }
-
-      - name: Release Summary
-        run: |
-          echo "✅ Release created successfully!"
-          echo "📱 Version: ${{ steps.extract_version.outputs.version_name }} (Build ${{ steps.extract_version.outputs.version_code }})"
-          echo "🔗 GitHub Release: ${{ steps.create_release.outputs.html_url }}"
-          echo "🚀 Backend notified with complete release data"
+    RELEASE_DATA=$(cat release_data.json)
+    
+    BACKEND_PAYLOAD=$(echo "$RELEASE_DATA" | jq --arg version_name "${{ steps.get_release.outputs.version_name }}" \
+      --arg version_code "${{ steps.extract_code.outputs.version_code }}" '{
+      app_name: "ELA",
+      package_name: "com.ela.app",
+      version_name: $version_name,
+      version_code: ($version_code | tonumber),
+      release_tag: .tag_name,
+      release_name: .name,
+      release_notes: .body,
+      release_url: .html_url,
+      github_release_id: .id,
+      created_at: .created_at,
+      published_at: .published_at,
+      apk_files: [.assets[] | select(.name | endswith(".apk")) | {
+        name: .name,
+        download_url: .browser_download_url,
+        size: .size,
+        download_count: .download_count,
+        content_type: .content_type,
+        github_asset_id: .id
+      }]
+    }')
+    
+    echo "Sending to backend server..."
+    echo "Data preview:"
+    echo "$BACKEND_PAYLOAD" | jq '.'
+    
+    curl -X POST "https://mfqdh2s3-8000.inc1.devtunnels.ms/api/releases/" \
+      -H "Content-Type: application/json" \
+      -H "User-Agent: ELA-Release-Sync" \
+      -d "$BACKEND_PAYLOAD" \
+      --max-time 30 \
+      --retry 2 \
+      --fail-with-body || {
+        echo "❌ Failed to sync to backend"
+        exit 1
+      }
+    
+    echo "✅ Successfully synced release to backend!"
