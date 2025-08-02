@@ -1,0 +1,71 @@
+name: Flutter Release & Backend Update
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: 'stable'
+    
+    - name: Extract version from pubspec.yaml
+      id: version
+      run: |
+        VERSION=$(grep '^version:' pubspec.yaml | cut -d ' ' -f 2)
+        VERSION_NAME=$(echo $VERSION | cut -d '+' -f 1)
+        VERSION_CODE=$(echo $VERSION | cut -d '+' -f 2)
+        echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
+        echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+        echo "full_version=$VERSION" >> $GITHUB_OUTPUT
+    
+    - name: Build APKs
+      run: |
+        flutter pub get
+        flutter build apk --release
+        flutter build apk --release --split-per-abi
+    
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: ELA v${{ steps.version.outputs.version_name }}
+        body: |
+          Release v${{ steps.version.outputs.version_name }} (Build ${{ steps.version.outputs.version_code }})
+          Automated release with general and per-ABI APKs
+        draft: false
+        prerelease: false
+    
+    - name: Upload APK Assets
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: build/app/outputs/flutter-apk/
+        asset_name: "*.apk"
+        asset_content_type: application/vnd.android.package-archive
+    
+    - name: Update Backend API
+      run: |
+        curl -X POST "https://your-backend.com/api/releases/" \
+        -H "Content-Type: application/json" \
+        -d '{
+          "app_name": "ELA",
+          "package_name": "com.ela.app",
+          "version_name": "${{ steps.version.outputs.version_name }}",
+          "version_code": ${{ steps.version.outputs.version_code }},
+          "release_tag": "${{ github.ref_name }}",
+          "release_notes": "Automated release v${{ steps.version.outputs.version_name }}",
+          "github_release_url": "${{ steps.create_release.outputs.html_url }}"
+        }'
